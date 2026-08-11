@@ -6,7 +6,7 @@ float64 j_d
 float64 i
 
 int32 nr
------
+---
 # response
 bool success
 string message

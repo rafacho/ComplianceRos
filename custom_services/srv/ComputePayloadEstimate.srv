@@ -1,11 +1,8 @@
 # request field
-float64 p
-float64 d
-
-int32 nr
------
+---
 # response
+float64 mass
+geometry_msgs/PointStamped position
 bool success
 string message
-
 

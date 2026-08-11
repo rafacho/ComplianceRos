@@ -1,6 +1,6 @@
 # CommnadMsg.msg
 
-Header header
+std_msgs/Header header
 float64 link_side_position
 float64 link_side_velocity
 float64 motor_side_position

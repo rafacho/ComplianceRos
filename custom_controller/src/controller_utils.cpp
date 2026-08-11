@@ -1,121 +1,87 @@
-/*********************************************************************
- * Software License Agreement (BSD License)
- *
- *  Copyright (c) 2008, Willow Garage, Inc.
- *  Copyright (c) 2012, hiDOF, Inc.
- *  All rights reserved.
- *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *   * Neither the name of the Willow Garage nor the names of its
- *     contributors may be used to endorse or promote products derived
- *     from this software without specific prior written permission.
- *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- *  POSSIBILITY OF SUCH DAMAGE.
- *********************************************************************/
-
 /*
  Author: Malgorzata Kamedula
  Desc: Effort position controller for the SEA with SEA simulation
+ ROS2 port: see controller_utils.h.
 */
 
 #include "custom_controller/controller_utils.h"
-#include "custom_services/getJointNames.h"
+
+#include <chrono>
+#include <memory>
+
+using namespace std::chrono_literals;
 
 namespace custom_controller
 {
 
-MapToUrdf::MapToUrdf(std::string topic, std::string controller)
+MapToUrdf::MapToUrdf(
+  const rclcpp::Node::SharedPtr & node, std::string topic, std::string controller)
 {
-  ros::Rate loop_rate(10);
-  ros::NodeHandle node;
+  RCLCPP_INFO_STREAM(node->get_logger(), "Waiting for callback");
 
-  ROS_INFO_STREAM("Waiting for callback");
+  auto init_sub = node->create_subscription<sensor_msgs::msg::JointState>(
+    topic, 1, std::bind(&MapToUrdf::initCallback, this, std::placeholders::_1));
 
-  ros::Subscriber init_sub = node.subscribe<sensor_msgs::JointState>(
-      topic, 1, &MapToUrdf::initCallback, this); // get urdf names
+  auto client = node->create_client<custom_services::srv::GetJointNames>(
+    controller + "/get_joint_names");
 
-  ros::ServiceClient client =
-      node.serviceClient<custom_services::getJointNames>(controller +
-                                                         "/get_joint_names");
-  custom_services::getJointNames srv;
-
-  if (!node.getParam(controller + "/dof", dofs))
-  {
-    ROS_ERROR("Number of joints not given 'dof' (namespace: %s)",
-              node.getNamespace().c_str());
+  if (!node->get_parameter(controller + "/dof", dofs_)) {
+    RCLCPP_ERROR(
+      node->get_logger(), "Number of joints not given 'dof' (namespace: %s)",
+      node->get_namespace());
     return;
   }
 
-//  ROS_INFO_STREAM(dofs);
-  id.reserve(dofs);
+  id_.reserve(dofs_);
 
-  while (!valid & ros::ok())
-  {
-    ros::spinOnce();
+  // NOTE(ros2-port): faithful translation of the ROS1 blocking spin-until-valid
+  // loop (rclcpp has no synchronous ros::spinOnce()/single-node equivalent to
+  // ros::ok(), so rclcpp::ok() + spin_some replaces it). This class is not
+  // wired into any controller (see header note), so this path is never
+  // exercised today.
+  //
+  // The free-function rclcpp::spin_some(node) overload is deprecated -- it
+  // builds a fresh SingleThreadedExecutor internally on every call instead of
+  // reusing one, so it's replaced here with an explicit executor built once
+  // before the loop.
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  rclcpp::Rate loop_rate(10.0);
+  while (!valid_ && rclcpp::ok()) {
+    executor.spin_some();
     loop_rate.sleep();
   }
 
-  // load all initialized controller names
-  if (client.call(srv))
-  {
-    for (int i = 0; i < srv.response.joints.size(); i++)
-      controller_names.push_back(srv.response.joints[i]);
-  }
-  else
-    ROS_ERROR_STREAM("Server doesn't work");
+  auto srv = std::make_shared<custom_services::srv::GetJointNames::Request>();
+  auto future = client->async_send_request(srv);
+  if (rclcpp::spin_until_future_complete(node, future) == rclcpp::FutureReturnCode::SUCCESS) {
+    auto response = future.get();
+    for (const auto & joint : response->joints) {
+      controller_names_.push_back(joint);
+    }
 
-  //	for (int i = 0; i<dofs; i++){
-  //		id.push_back(-1);
-  //		}
-  id.resize(dofs, NON_EXISTING);
-//  std::fill(id.begin(), id.end(), NON_EXISTING); // UINT_MAX -> non existing mapping
+    id_.resize(dofs_, NON_EXISTING);
 
-  for (int i = 0; i < controller_names.size(); i++)
-  {
-    for (int j = 0; j < urdf_names.size(); j++)
-    {
-      if (controller_names.at(i) == urdf_names.at(j))
-      {
-        id.at(srv.response.ids.at(i)) = j;
-        //			std::cout << "We're equal, best " <<
-        // srv.response.ids[i] << " & " << j << std::endl;
-        break;
+    for (size_t i = 0; i < controller_names_.size(); i++) {
+      for (size_t j = 0; j < urdf_names_.size(); j++) {
+        if (controller_names_.at(i) == urdf_names_.at(j)) {
+          id_.at(response->ids.at(i)) = static_cast<int>(j);
+          break;
+        }
       }
     }
+  } else {
+    RCLCPP_ERROR_STREAM(node->get_logger(), "Server doesn't work");
+    id_.resize(dofs_, NON_EXISTING);
   }
-
- // ROS_INFO_STREAM("THE END");
 }
-void MapToUrdf::initCallback(const sensor_msgs::JointState::ConstPtr& msg)
+
+void MapToUrdf::initCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-
-  for (auto& name: msg->name)
-  {
-    urdf_names.push_back(name);
+  for (const auto & name : msg->name) {
+    urdf_names_.push_back(name);
   }
-
-  valid = true;
+  valid_ = true;
 }
 
-
-} // namespace
+}  // namespace custom_controller

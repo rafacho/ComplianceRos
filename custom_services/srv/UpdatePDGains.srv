@@ -1,8 +1,9 @@
 # request field
+float64 p
+float64 d
 
-string file
-
------
+int32 nr
+---
 # response
 bool success
 string message
