@@ -218,7 +218,12 @@ bool ActuatorPositionController::initActuators()
 
 void ActuatorPositionController::initCommand()
 {
-  command_struct_.position.resize(raw_dof_, 0);
+  // Commanded position until the first message on ~/command (2026-10-12):
+  // with 0 the PANDORA legs start fully retracted and the leg linkage rests
+  // on terrain crests, so an initial raised posture can be configured.
+  double initial_position = 0.0;
+  get_node()->get_parameter_or("initial_position", initial_position, 0.0);
+  command_struct_.position.resize(raw_dof_, initial_position);
   command_struct_.velocity.resize(raw_dof_, 0);
   command_struct_.effort.resize(raw_dof_, 0);
   command_struct_.online_gain1.resize(raw_dof_, 0);
@@ -280,6 +285,8 @@ controller_interface::CallbackReturn ActuatorPositionController::on_configure(
   node->get_parameter_or("controller_update", update_rate, static_cast<int64_t>(1));
   update_rate_ = static_cast<int>(update_rate);
 
+  node->get_parameter_or("integral_on_link", integral_on_link_, true);
+
   // NOTE(ros2-port fix, 2026-08-06): relative names ("debug", "command", ...)
   // resolve against the node's *namespace* only in ROS2, not its name -- on
   // controller_manager's default (root) namespace that produced /debug,
@@ -337,6 +344,7 @@ controller_interface::CallbackReturn ActuatorPositionController::on_activate(
   for (int i = 0; i < dof_; ++i) {
     actuators_.at(i).position = links_.at(i).getPosition();
     actuators_.at(i).velocity = links_.at(i).getVelocity();
+    controllers_.at(i).integrator_error = 0.0;
   }
   command_buffer_.initRT(command_struct_);
   loop_count_ = 0;
@@ -373,8 +381,12 @@ controller_interface::return_type ActuatorPositionController::update(
     }
 
     if (do_update) {
+      // the control law runs once every update_rate_ loops, so its sample
+      // time (for the integral) is update_rate_ * period.
       actuators_.at(i).motor_torque = controllers_.at(i).update(
-        command_position, command_effort, actuators_.at(i).position, actuators_.at(i).velocity);
+        command_position, command_effort, actuators_.at(i).position, actuators_.at(i).velocity,
+        links_.at(i).getPosition(), links_.at(i).getVelocity(),
+        period_sec * update_rate_, actuators_.at(i).torque_limit, integral_on_link_);
     }
 
     actuators_.at(i).enforceTorqueLimit();
@@ -431,12 +443,25 @@ void ActuatorPositionController::Link::computeEffort(Actuator & actuator)
 }
 
 double ActuatorPositionController::Controller::update(
-  double desired_position, double feed_forward, double position, double velocity)
+  double desired_position, double feed_forward, double motor_position,
+  double motor_velocity, double link_position, double link_velocity,
+  double dt, double integral_limit, bool integral_on_link)
 {
   enforceStateLimits(desired_position);
-  double error = desired_position - position;
-  integrator_error += error;
-  return feed_forward + Ki * integrator_error + a_Kp * error - a_Kd * velocity;
+  double error = desired_position - motor_position;
+  double integrated_error = integral_on_link ? desired_position - link_position : error;
+
+  // Fix (2026-10-12): was `integrator_error += error` (per-sample sum, no dt,
+  // no limit) -- Ki then depended on update_rate and wound up without bound
+  // whenever the torque saturated (e.g. a wheel stuck against an obstacle).
+  integrator_error += integrated_error * dt;
+  if (Ki > 0.0) {
+    const double i_max = integral_limit / Ki;
+    integrator_error = std::clamp(integrator_error, -i_max, i_max);
+  }
+
+  return feed_forward + Ki * integrator_error + a_Kp * error - a_Kd * motor_velocity -
+         j_Kd * link_velocity;
 }
 
 void ActuatorPositionController::Controller::enforceStateLimits(double & command)

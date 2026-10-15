@@ -143,10 +143,17 @@ private:
     void enforceTorqueLimit();
   };
 
-  // Per-joint PID-like control law: identical to the ROS1 "_classes" variant
-  // (a_Kp/a_Kd act on the motor-side error, Ki integrates it; j_Kp/j_Kd are
-  // read from parameters for config compatibility but were already unused in
-  // the ROS1 control law, so they stay unused here too).
+  // Per-joint PID-like control law. a_Kp/a_Kd act on the motor side (as in
+  // the ROS1 "_classes" variant). Fix (2026-10-12):
+  //  - Ki integrates error*dt (Nm/(rad s)), not a per-sample sum, so it no
+  //    longer depends on update_rate; clamped so |Ki*I| <= torque limit
+  //    (anti-windup) and reset on activate.
+  //  - with integral_on_link (default), the integrated error is the LINK
+  //    position error -- removes the spring deflection under load (load/Ks),
+  //    which the motor-side integral could never correct.
+  //  - j_Kd: active damping on link velocity (was read but unused).
+  //  j_Kp is still unused (non-collocated link stiffness; kept for config
+  //  compatibility).
   class Controller
   {
   public:
@@ -169,7 +176,10 @@ private:
     JointType type;
 
     void enforceStateLimits(double & command);
-    double update(double desired_position, double feed_forward, double position, double velocity);
+    double update(
+      double desired_position, double feed_forward, double motor_position,
+      double motor_velocity, double link_position, double link_velocity,
+      double dt, double integral_limit, bool integral_on_link);
   };
 
   // Link (URDF joint) side: holds the loaned effort command interface and the
@@ -239,6 +249,7 @@ private:
   int loop_count_ = 0;
   int update_rate_ = 1;
   bool ff_torque_enabled_ = false;
+  bool integral_on_link_ = true;
 
   std::vector<Link> links_;
   std::vector<Controller> controllers_;
