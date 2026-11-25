@@ -286,6 +286,7 @@ controller_interface::CallbackReturn ActuatorPositionController::on_configure(
   update_rate_ = static_cast<int>(update_rate);
 
   node->get_parameter_or("integral_on_link", integral_on_link_, true);
+  node->get_parameter_or("startup_rate", startup_rate_, 0.0);
 
   // NOTE(ros2-port fix, 2026-08-06): relative names ("debug", "command", ...)
   // resolve against the node's *namespace* only in ROS2, not its name -- on
@@ -349,6 +350,14 @@ controller_interface::CallbackReturn ActuatorPositionController::on_activate(
   command_buffer_.initRT(command_struct_);
   loop_count_ = 0;
 
+  // Soft start: begin at the measured link positions (see startup_rate_).
+  command_received_ = false;
+  startup_active_ = startup_rate_ > 0.0;
+  startup_position_.assign(raw_dof_, 0.0);
+  for (int i = 0; i < dof_; ++i) {
+    startup_position_.at(selector_.at(i)) = links_.at(i).getPosition();
+  }
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -370,10 +379,25 @@ controller_interface::return_type ActuatorPositionController::update(
   double period_sec = period.seconds();
   bool do_update = !(loop_count_ % update_rate_);
 
+  if (startup_active_ && command_received_) {
+    startup_active_ = false;
+  }
+  bool startup_done = true;
+
   for (int i = 0; i < dof_; ++i) {
     int real_id = selector_.at(i);
 
     double command_position = command_struct_.position[real_id];
+    if (startup_active_) {
+      // slew from the measured position towards initial_position
+      double max_step = startup_rate_ * period_sec;
+      double & p = startup_position_.at(real_id);
+      p += std::max(-max_step, std::min(max_step, command_position - p));
+      if (p != command_position) {
+        startup_done = false;
+      }
+      command_position = p;
+    }
     double command_effort = command_struct_.effort[real_id];
 
     if (!ff_torque_enabled_) {
@@ -396,6 +420,10 @@ controller_interface::return_type ActuatorPositionController::update(
 
   for (int i = 0; i < dof_; ++i) {
     links_.at(i).send();
+  }
+
+  if (startup_active_ && startup_done) {
+    startup_active_ = false;
   }
 
   if (do_update) {
@@ -501,6 +529,7 @@ void ActuatorPositionController::setCommand(
   command_struct_.online_gain1 = gain1_command;
   command_struct_.online_gain2 = gain2_command;
   command_buffer_.writeFromNonRT(command_struct_);
+  command_received_ = true;
 }
 
 void ActuatorPositionController::setCommandCallback(const custom_messages::msg::CustomCmnd & msg)

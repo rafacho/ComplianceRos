@@ -53,6 +53,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <atomic>
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
@@ -250,6 +251,14 @@ private:
   int update_rate_ = 1;
   bool ff_torque_enabled_ = false;
   bool integral_on_link_ = true;
+  // Soft start (2026-11-24): on activation the commanded position starts at
+  // each measured link position and slews to initial_position at
+  // startup_rate_ (rad/s) until it gets there or the first ~/command message
+  // arrives. 0 = old behaviour (step to initial_position on activation).
+  double startup_rate_ = 0.0;
+  bool startup_active_ = false;
+  std::atomic<bool> command_received_{false};
+  std::vector<double> startup_position_;
 
   std::vector<Link> links_;
   std::vector<Controller> controllers_;
