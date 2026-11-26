@@ -287,6 +287,9 @@ controller_interface::CallbackReturn ActuatorPositionController::on_configure(
 
   node->get_parameter_or("integral_on_link", integral_on_link_, true);
   node->get_parameter_or("startup_rate", startup_rate_, 0.0);
+  int64_t state_publish_every = 1;
+  node->get_parameter_or("state_publish_every", state_publish_every, static_cast<int64_t>(1));
+  state_publish_every_ = std::max(1, static_cast<int>(state_publish_every));
 
   // NOTE(ros2-port fix, 2026-08-06): relative names ("debug", "command", ...)
   // resolve against the node's *namespace* only in ROS2, not its name -- on
@@ -426,7 +429,7 @@ controller_interface::return_type ActuatorPositionController::update(
     startup_active_ = false;
   }
 
-  if (do_update) {
+  if (!(loop_count_ % state_publish_every_)) {
     publishState(time);
     publishDebug(time);
   }

@@ -249,6 +249,10 @@ private:
 
   int loop_count_ = 0;
   int update_rate_ = 1;
+  // ~/state and ~/debug are published once every state_publish_every_ loops
+  // (2026-11-25). The control law still runs every update_rate_ loops; at
+  // 2 kHz, publishing every loop flooded the Python consumers.
+  int state_publish_every_ = 1;
   bool ff_torque_enabled_ = false;
   bool integral_on_link_ = true;
   // Soft start (2026-11-24): on activation the commanded position starts at
